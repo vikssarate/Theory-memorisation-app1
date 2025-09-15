@@ -43,6 +43,12 @@ ul{padding:0;margin:0}.list{display:flex;flex-direction:column;gap:8px;max-heigh
 .caret.rot{transform:rotate(90deg)}
 .subj-head,.topic-head{display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:pointer}
 .chunk-pill{padding:4px 8px;border:1px solid var(--line);border-radius:8px;font-size:12px;display:inline-block;margin:4px 6px 0 0}
+
+/* Progress bar */
+.prog{margin-top:10px}
+.prog .line{height:10px;background:#0f1325;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.prog .bar{height:100%;background:var(--ok);width:0%}
+.prog .labels{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:6px;gap:8px;flex-wrap:wrap}
 </style>
 </head>
 <body>
@@ -104,6 +110,10 @@ const UI = { sub: new Map(), topic: new Map() };
 
 const SCHEDULE_GROUPS=[{gap:1,reps:6},{gap:2,reps:6},{gap:3,reps:5},{gap:4,reps:4},{gap:8,reps:4},{gap:16,reps:3},{gap:28,reps:2}];
 const PERPETUAL_GAP=7;
+const TOTAL_SPACED_REPS = SCHEDULE_GROUPS.reduce((a,g)=>a+g.reps,0);
+const TOTAL_INTENSE_DAYS = 3;
+const TOTAL_WEEK_STREAK = 3;
+const TOTAL_CYCLE = TOTAL_INTENSE_DAYS + TOTAL_WEEK_STREAK + TOTAL_SPACED_REPS;
 
 function save(){localStorage.setItem(LSK,JSON.stringify(DB)); renderAll();}
 
@@ -147,18 +157,47 @@ function normalizeChunk(ch){
   if(ch.phase==="intense" && intenseDone(ch)){ startWeekStreak(ch); }
 }
 
-/* ===== DOM ===== */
-const $=(s,el=document)=>el.querySelector(s);
-const subjectsEl=$("#subjects"), todayDateEl=$("#todayDate"), dueCountsEl=$("#dueCounts"), todayTbody=$("#todayTable tbody"), workArea=$("#workArea");
-
 /* ===== Week-Streak button enable logic ===== */
 function canReviewWeekStreak(ch){
   const t=todayYMD();
   const last=ch.weekStreak.lastDay;
-  if(!last) return true; // never reviewed in week-streak yet
-  if(last===t && ch.weekStreak.streak<3) return true; // allow 2/3, 3/3 same day
+  if(!last) return true;
+  if(last===t && ch.weekStreak.streak<3) return true;
   const next=addDaysYMD(last,1);
-  return isPastOrToday(next); // tomorrow or later
+  return isPastOrToday(next);
+}
+
+/* ===== DOM ===== */
+const $=(s,el=document)=>el.querySelector(s);
+const subjectsEl=$("#subjects"), todayDateEl=$("#todayDate"), dueCountsEl=$("#dueCounts"), todayTbody=$("#todayTable tbody"), workArea=$("#workArea");
+
+/* ===== Cycle progress helpers ===== */
+function intenseDaysDoneCount(ch){
+  return ["day1","day2","day3"].reduce((n,k)=>n+ (ch.intense[k].every(Boolean)?1:0),0);
+}
+function spacedRepsDoneCount(ch){
+  if(ch.phase==="weekly") return TOTAL_SPACED_REPS;
+  let done=0;
+  for(let i=0;i<ch.spaced.groupIndex;i++) done+=SCHEDULE_GROUPS[i].reps;
+  const cur=SCHEDULE_GROUPS[ch.spaced.groupIndex];
+  if(cur) done+=Math.min(ch.spaced.repsDoneInGroup, cur.reps);
+  return done;
+}
+function cycleTotals(ch){
+  const intenseDone = (ch.phase==="intense") ? intenseDaysDoneCount(ch)
+                    : TOTAL_INTENSE_DAYS;
+  const weekDone = (ch.phase==="intense") ? 0
+                   : (ch.phase==="week_streak") ? Math.min(ch.weekStreak.streak, TOTAL_WEEK_STREAK)
+                   : TOTAL_WEEK_STREAK;
+  const spacedDone = (ch.phase==="spaced" || ch.phase==="weekly") ? spacedRepsDoneCount(ch) : 0;
+  const completed = intenseDone + weekDone + spacedDone;
+  const pct = Math.max(0, Math.min(100, Math.round((completed / TOTAL_CYCLE) * 100)));
+  return {
+    completed, pct,
+    intenseDone,
+    weekDone,
+    spacedDone
+  };
 }
 
 /* ===== RENDER ===== */
@@ -220,15 +259,23 @@ function renderSubjects(){
         `;
 
         const chunkWrap = ti.querySelector("[data-chunks]");
-        if(t.chunks.length===0){
-          chunkWrap.innerHTML = '<div class="empty">No chunks yet.</div>';
-        }else{
-          chunkWrap.innerHTML = t.chunks.map(ch => `
-            <button class="chunk-pill" data-act="open-chunk" data-sub="${sub.id}" data-topic="${t.id}" data-ch="${ch.id}">
-              ${ch.name}
-            </button>
-          `).join("");
-        }
+        chunkWrap.innerHTML = t.chunks.length
+          ? t.chunks.map(ch => `<button class="chunk-pill" data-act="open-chunk" data-sub="${sub.id}" data-topic="${t.id}" data-ch="${ch.id}">${ch.name}</button>`).join("")
+          : '<div class="empty">No chunks yet.</div>';
+
+        ti.addEventListener("click",(e)=>{
+          const btn=e.target.closest("[data-act]"); if(!btn) return;
+          const act=btn.dataset.act;
+          const subRef = DB.subjects.find(s=>s.id===sub.id);
+          const topic=subRef.topics.find(x=>x.id===t.id);
+
+          if(act==="toggle-topic"){ const key=`${sub.id}:${t.id}`; UI.topic.set(key, !(UI.topic.get(key) ?? false)); renderSubjects(); return; }
+          if(act==="rename-topic"){const n=prompt("Rename topic",topic.name); if(n){topic.name=n; save();}}
+          if(act==="del-topic"){if(confirm("Delete topic and all its chunks?")){subRef.topics=subRef.topics.filter(x=>x.id!==t.id); save();}}
+          if(act==="add-chunk"){ const name=ti.querySelector(".chunk-name").value.trim(); if(!name) return; topic.chunks.push(createChunk(name)); save(); }
+          if(act==="bulk-demo"){topic.chunks.push(createChunk("A1"),createChunk("A2")); save();}
+          if(act==="open-chunk"){openTopic(subRef.id, topic.id);}
+        });
 
         topicsWrap.appendChild(ti);
       });
@@ -274,6 +321,26 @@ function renderSubjects(){
   });
 }
 
+function renderCycleFooterHTML(ch){
+  const stats = cycleTotals(ch);
+  const pct = stats.pct;
+  const intense = `${stats.intenseDone}/${TOTAL_INTENSE_DAYS}`;
+  const week = `${Math.min(ch.weekStreak?.streak||0,3)}/${TOTAL_WEEK_STREAK}`;
+  const spaced = `${spacedRepsDoneCount(ch)}/${TOTAL_SPACED_REPS}`;
+  return `
+    <div class="prog" aria-label="Cycle progress">
+      <div class="line"><div class="bar" style="width:${pct}%"></div></div>
+      <div class="labels">
+        <span><b>${pct}%</b> of full cycle</span>
+        <span>Intense: ${intense}</span>
+        <span>Week-streak: ${week}</span>
+        <span>Spaced: ${spaced}</span>
+        <span>Weekly: repeats forever</span>
+      </div>
+    </div>
+  `;
+}
+
 function openTopic(subId,topicId){
   const sub=DB.subjects.find(s=>s.id===subId); const topic=sub?.topics.find(t=>t.id===topicId);
   if(!topic){workArea.textContent="Topic not found"; return;}
@@ -298,7 +365,9 @@ function openTopic(subId,topicId){
           <button class="btn danger" data-act="del">Delete</button>
         </div>
       </div>
-      ${renderChunkBody(ch)}`;
+      ${renderChunkBody(ch)}
+      ${renderCycleFooterHTML(ch)}
+    `;
     attachChunkHandlers(card, topic, ch);
     container.append(card);
   });
@@ -344,8 +413,7 @@ function renderChunkBody(ch){
   }
   if(ch.phase==="week_streak"){
     const due=ch.weekStreak.lastDay?addDaysYMD(ch.weekStreak.lastDay,1):todayYMD();
-    const ok=canReviewWeekStreak(ch);  /* <-- updated enable logic */
-
+    const ok=canReviewWeekStreak(ch);
     return `
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div class="small">Streak ${ch.weekStreak.streak}/3 — Next due: ${due}</div>
@@ -425,28 +493,22 @@ function doWeekStreakReview(ch){
   const last=ch.weekStreak.lastDay;
 
   if(!last){
-    // first ever week-streak review
     ch.weekStreak.streak = 1;
     ch.weekStreak.lastDay = today;
   } else if(today===last){
-    // allow multiple reviews today (cap at 3)
     ch.weekStreak.streak = Math.min(3, ch.weekStreak.streak + 1);
-    // keep lastDay as today
   } else {
-    // different day
     const expected=addDaysYMD(last,1);
     ch.weekStreak.streak = (today===expected) ? (ch.weekStreak.streak+1) : 1;
     ch.weekStreak.lastDay = today;
   }
 
-  // transition to spaced when streak hits 3
   if(ch.weekStreak.streak>=3){
     ch.phase="spaced";
     ch.spaced.groupIndex=0; ch.spaced.repsDoneInGroup=0;
     ch.spaced.nextDue=addDaysYMD(todayYMD(),SCHEDULE_GROUPS[0].gap);
   }
 }
-
 function doSpacedReview(ch){
   const g=SCHEDULE_GROUPS[ch.spaced.groupIndex];
   if(!g){ ch.phase="weekly"; ch.weekly.nextDue=addDaysYMD(todayYMD(),PERPETUAL_GAP); return; }
@@ -470,7 +532,6 @@ function collectDue(){
     let due=false, phase="";
     if(ch.phase==="intense"){due=true; phase="Intense";}
     else if(ch.phase==="week_streak"){
-      // enable row action if our helper says so
       due = canReviewWeekStreak(ch);
       phase="Week-Streak";
     } else if(ch.phase==="spaced"){due=isPastOrToday(ch.spaced.nextDue); phase="Spaced";}
