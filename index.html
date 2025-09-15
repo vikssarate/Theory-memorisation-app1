@@ -44,7 +44,11 @@ ul{padding:0;margin:0}.list{display:flex;flex-direction:column;gap:8px;max-heigh
 .subj-head,.topic-head{display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:pointer}
 .chunk-pill{padding:4px 8px;border:1px solid var(--line);border-radius:8px;font-size:12px;display:inline-block;margin:4px 6px 0 0}
 
-/* Progress bar */
+/* highlight currently opened chunk */
+.flash{animation:flash 1.2s ease}
+@keyframes flash{0%{box-shadow:0 0 0 0 rgba(123,216,143,.9)}100%{box-shadow:0 0 0 0 rgba(123,216,143,0)}}
+
+/* progress bar */
 .prog{margin-top:10px}
 .prog .line{height:10px;background:#0f1325;border:1px solid var(--line);border-radius:8px;overflow:hidden}
 .prog .bar{height:100%;background:var(--ok);width:0%}
@@ -106,15 +110,13 @@ const LSK="mem_spaced_v11";
 let DB=JSON.parse(localStorage.getItem(LSK)||'{"subjects":[]}');
 
 /* UI expand/collapse state (not exported) */
-const UI = { sub: new Map(), topic: new Map() };
+const UI = { sub: new Map(), topic: new Map(), current: {subId:null, topicId:null, chunkId:null} };
 
 const SCHEDULE_GROUPS=[{gap:1,reps:6},{gap:2,reps:6},{gap:3,reps:5},{gap:4,reps:4},{gap:8,reps:4},{gap:16,reps:3},{gap:28,reps:2}];
 const PERPETUAL_GAP=7;
 const TOTAL_SPACED_REPS = SCHEDULE_GROUPS.reduce((a,g)=>a+g.reps,0);
-const TOTAL_INTENSE_DAYS = 3;
-const TOTAL_WEEK_STREAK = 3;
-const TOTAL_CYCLE = TOTAL_INTENSE_DAYS + TOTAL_WEEK_STREAK + TOTAL_SPACED_REPS;
 
+/* ===== SAVE & RENDER ===== */
 function save(){localStorage.setItem(LSK,JSON.stringify(DB)); renderAll();}
 
 /* ===== MODELS ===== */
@@ -157,7 +159,7 @@ function normalizeChunk(ch){
   if(ch.phase==="intense" && intenseDone(ch)){ startWeekStreak(ch); }
 }
 
-/* ===== Week-Streak button enable logic ===== */
+/* ===== Week-Streak enable ===== */
 function canReviewWeekStreak(ch){
   const t=todayYMD();
   const last=ch.weekStreak.lastDay;
@@ -171,10 +173,7 @@ function canReviewWeekStreak(ch){
 const $=(s,el=document)=>el.querySelector(s);
 const subjectsEl=$("#subjects"), todayDateEl=$("#todayDate"), dueCountsEl=$("#dueCounts"), todayTbody=$("#todayTable tbody"), workArea=$("#workArea");
 
-/* ===== Cycle progress helpers ===== */
-function intenseDaysDoneCount(ch){
-  return ["day1","day2","day3"].reduce((n,k)=>n+ (ch.intense[k].every(Boolean)?1:0),0);
-}
+/* ===== PROGRESS (concise) ===== */
 function spacedRepsDoneCount(ch){
   if(ch.phase==="weekly") return TOTAL_SPACED_REPS;
   let done=0;
@@ -183,21 +182,24 @@ function spacedRepsDoneCount(ch){
   if(cur) done+=Math.min(ch.spaced.repsDoneInGroup, cur.reps);
   return done;
 }
-function cycleTotals(ch){
-  const intenseDone = (ch.phase==="intense") ? intenseDaysDoneCount(ch)
-                    : TOTAL_INTENSE_DAYS;
-  const weekDone = (ch.phase==="intense") ? 0
-                   : (ch.phase==="week_streak") ? Math.min(ch.weekStreak.streak, TOTAL_WEEK_STREAK)
-                   : TOTAL_WEEK_STREAK;
-  const spacedDone = (ch.phase==="spaced" || ch.phase==="weekly") ? spacedRepsDoneCount(ch) : 0;
-  const completed = intenseDone + weekDone + spacedDone;
-  const pct = Math.max(0, Math.min(100, Math.round((completed / TOTAL_CYCLE) * 100)));
-  return {
-    completed, pct,
-    intenseDone,
-    weekDone,
-    spacedDone
-  };
+function renderCycleFooterHTML(ch){
+  const intenseDays=["day1","day2","day3"].reduce((n,k)=>n+(ch.intense[k].every(Boolean)?1:0),0);
+  const week= Math.min(ch.weekStreak?.streak||0,3);
+  const spaced= spacedRepsDoneCount(ch);
+  const total = 3 + 3 + SCHEDULE_GROUPS.reduce((a,g)=>a+g.reps,0);
+  const pct = Math.round(((intenseDays + week + spaced)/total)*100);
+  return `
+    <div class="prog">
+      <div class="line"><div class="bar" style="width:${pct}%"></div></div>
+      <div class="labels">
+        <span><b>${pct}%</b> of full cycle</span>
+        <span>Intense ${intenseDays}/3</span>
+        <span>Week-streak ${week}/3</span>
+        <span>Spaced ${spaced}/${total-6}</span>
+        <span>Weekly repeats forever</span>
+      </div>
+    </div>
+  `;
 }
 
 /* ===== RENDER ===== */
@@ -243,6 +245,7 @@ function renderSubjects(){
           <div class="topic-head" data-act="toggle-topic" data-sub="${sub.id}" data-topic="${t.id}">
             <div><span class="caret ${tOpen?'rot':''}">▶</span><strong>${t.name}</strong> <span class="small">(${t.chunks.length} chunks)</span></div>
             <span style="display:flex;gap:6px">
+              <button class="btn" data-act="quick-add-chunk" data-sub="${sub.id}" data-topic="${t.id}">+ Chunk</button>
               <button class="btn alt" data-act="rename-topic" data-sub="${sub.id}" data-topic="${t.id}">Rename</button>
               <button class="btn danger" data-act="del-topic" data-sub="${sub.id}" data-topic="${t.id}">Delete</button>
             </span>
@@ -259,22 +262,36 @@ function renderSubjects(){
         `;
 
         const chunkWrap = ti.querySelector("[data-chunks]");
-        chunkWrap.innerHTML = t.chunks.length
-          ? t.chunks.map(ch => `<button class="chunk-pill" data-act="open-chunk" data-sub="${sub.id}" data-topic="${t.id}" data-ch="${ch.id}">${ch.name}</button>`).join("")
-          : '<div class="empty">No chunks yet.</div>';
+        if(t.chunks.length===0){
+          chunkWrap.innerHTML = '<div class="empty">No chunks yet.</div>';
+        }else{
+          chunkWrap.innerHTML = t.chunks.map(ch => `
+            <button class="chunk-pill" data-act="open-chunk" data-sub="${sub.id}" data-topic="${t.id}" data-ch="${ch.id}">
+              ${ch.name}
+            </button>
+          `).join("");
+        }
 
+        // handle clicks inside this topic item
         ti.addEventListener("click",(e)=>{
           const btn=e.target.closest("[data-act]"); if(!btn) return;
           const act=btn.dataset.act;
-          const subRef = DB.subjects.find(s=>s.id===sub.id);
-          const topic=subRef.topics.find(x=>x.id===t.id);
+          const sid=btn.dataset.sub; const tid=btn.dataset.topic;
+          const subRef=DB.subjects.find(s=>s.id===sid);
+          const topic=subRef.topics.find(x=>x.id===tid);
 
-          if(act==="toggle-topic"){ const key=`${sub.id}:${t.id}`; UI.topic.set(key, !(UI.topic.get(key) ?? false)); renderSubjects(); return; }
-          if(act==="rename-topic"){const n=prompt("Rename topic",topic.name); if(n){topic.name=n; save();}}
-          if(act==="del-topic"){if(confirm("Delete topic and all its chunks?")){subRef.topics=subRef.topics.filter(x=>x.id!==t.id); save();}}
-          if(act==="add-chunk"){ const name=ti.querySelector(".chunk-name").value.trim(); if(!name) return; topic.chunks.push(createChunk(name)); save(); }
-          if(act==="bulk-demo"){topic.chunks.push(createChunk("A1"),createChunk("A2")); save();}
-          if(act==="open-chunk"){openTopic(subRef.id, topic.id);}
+          if(act==="toggle-topic"){ UI.topic.set(`${sid}:${tid}`, !(UI.topic.get(`${sid}:${tid}`) ?? false)); renderSubjects(); return; }
+          if(act==="rename-topic"){const n=prompt("Rename topic",topic.name); if(n){topic.name=n; save();} return;}
+          if(act==="del-topic"){if(confirm("Delete topic and all its chunks?")){subRef.topics=subRef.topics.filter(x=>x.id!==tid); save();} return;}
+          if(act==="add-chunk"){const n=ti.querySelector(".chunk-name").value.trim(); if(!n) return; topic.chunks.push(createChunk(n)); save(); return;}
+          if(act==="quick-add-chunk"){const n=prompt("New chunk name"); if(!n) return; topic.chunks.push(createChunk(n)); save(); return;}
+          if(act==="bulk-demo"){topic.chunks.push(createChunk("A1"),createChunk("A2")); save(); return;}
+          if(act==="open-chunk"){
+            const cid=btn.dataset.ch;
+            UI.current={subId:sid, topicId:tid, chunkId:cid};
+            openTopic(sid, tid, cid);
+            return;
+          }
         });
 
         topicsWrap.appendChild(ti);
@@ -291,13 +308,6 @@ function renderSubjects(){
         renderSubjects();
         return;
       }
-      if(act==="toggle-topic"){
-        const sid=btn.dataset.sub, tid=btn.dataset.topic;
-        const key=`${sid}:${tid}`;
-        UI.topic.set(key, !(UI.topic.get(key) ?? false));
-        renderSubjects();
-        return;
-      }
 
       const sid = btn.dataset.id || btn.dataset.sub;
       const subRef = DB.subjects.find(s=>s.id===sid);
@@ -305,16 +315,6 @@ function renderSubjects(){
       if(act==="rename-sub"){const n=prompt("Rename subject",subRef.name); if(n){subRef.name=n; save();} return;}
       if(act==="del-sub"){if(confirm("Delete subject and EVERYTHING?")){DB.subjects=DB.subjects.filter(x=>x.id!==sub.id); save();} return;}
       if(act==="add-topic"){const n=li.querySelector(".topic-name").value.trim(); if(!n) return; subRef.topics.push(createTopic(n)); save(); return;}
-
-      if(act==="rename-topic"||act==="del-topic"||act==="add-chunk"||act==="bulk-demo"||act==="open-chunk"){
-        const tid=btn.dataset.topic;
-        const topic=subRef.topics.find(t=>t.id===tid);
-        if(act==="rename-topic"){const n=prompt("Rename topic",topic.name); if(n){topic.name=n; save();} return;}
-        if(act==="del-topic"){if(confirm("Delete topic and all its chunks?")){subRef.topics=subRef.topics.filter(x=>x.id!==tid); save();} return;}
-        if(act==="add-chunk"){const n=btn.closest(".topic-body").querySelector(".chunk-name").value.trim(); if(!n) return; topic.chunks.push(createChunk(n)); save(); return;}
-        if(act==="bulk-demo"){topic.chunks.push(createChunk("A1"),createChunk("A2")); save(); return;}
-        if(act==="open-chunk"){openTopic(subRef.id, topic.id); return;}
-      }
     });
 
     subjectsEl.appendChild(li);
@@ -322,41 +322,44 @@ function renderSubjects(){
 }
 
 function renderCycleFooterHTML(ch){
-  const stats = cycleTotals(ch);
-  const pct = stats.pct;
-  const intense = `${stats.intenseDone}/${TOTAL_INTENSE_DAYS}`;
-  const week = `${Math.min(ch.weekStreak?.streak||0,3)}/${TOTAL_WEEK_STREAK}`;
-  const spaced = `${spacedRepsDoneCount(ch)}/${TOTAL_SPACED_REPS}`;
+  const totalSpaced = SCHEDULE_GROUPS.reduce((a,g)=>a+g.reps,0);
+  const intenseDays=["day1","day2","day3"].reduce((n,k)=>n+(ch.intense[k].every(Boolean)?1:0),0);
+  const week= Math.min(ch.weekStreak?.streak||0,3);
+  const spaced= spacedRepsDoneCount(ch);
+  const total = 3 + 3 + totalSpaced;
+  const pct = Math.round(((intenseDays + week + spaced)/total)*100);
   return `
-    <div class="prog" aria-label="Cycle progress">
+    <div class="prog">
       <div class="line"><div class="bar" style="width:${pct}%"></div></div>
       <div class="labels">
         <span><b>${pct}%</b> of full cycle</span>
-        <span>Intense: ${intense}</span>
-        <span>Week-streak: ${week}</span>
-        <span>Spaced: ${spaced}</span>
-        <span>Weekly: repeats forever</span>
+        <span>Intense ${intenseDays}/3</span>
+        <span>Week-streak ${week}/3</span>
+        <span>Spaced ${spaced}/${totalSpaced}</span>
       </div>
     </div>
   `;
 }
 
-function openTopic(subId,topicId){
+function openTopic(subId,topicId,highlightChunkId=null){
   const sub=DB.subjects.find(s=>s.id===subId); const topic=sub?.topics.find(t=>t.id===topicId);
   if(!topic){workArea.textContent="Topic not found"; return;}
   workArea.classList.remove("empty");
+
+  const selectedChunkName = highlightChunkId ? (topic.chunks.find(c=>c.id===highlightChunkId)?.name || "") : "";
   workArea.innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:center">
       <div><strong>${sub.name}</strong> → <strong>${topic.name}</strong></div>
-      <div class="small">Chunks: ${topic.chunks.length}</div>
+      <div class="small">${selectedChunkName?`Currently selected: <b>${selectedChunkName}</b>`:""}</div>
     </div>
     <div class="hr"></div>
     <div id="chunkList"></div>`;
   const container=$("#chunkList",workArea);
+
   if(topic.chunks.length===0){container.innerHTML='<div class="empty">No chunks yet.</div>';return;}
   topic.chunks.forEach(ch=>{
     normalizeChunk(ch);
-    const card=document.createElement("div"); card.className="card";
+    const card=document.createElement("div"); card.className="card"; card.id=`chunk-${ch.id}`;
     card.innerHTML=`
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
         <div><strong>${ch.name}</strong> <span class="badge ${phaseClass(ch)}">${phaseLabel(ch)}</span></div>
@@ -371,6 +374,12 @@ function openTopic(subId,topicId){
     attachChunkHandlers(card, topic, ch);
     container.append(card);
   });
+
+  // Jump to and flash the chosen chunk, if provided
+  if(highlightChunkId){
+    const el = document.getElementById(`chunk-${highlightChunkId}`);
+    if(el){ el.scrollIntoView({behavior:"smooth",block:"start"}); el.classList.add("flash"); setTimeout(()=>el.classList.remove("flash"),1200); }
+  }
 }
 
 function phaseLabel(ch){return ch.phase==="intense"?"intense":ch.phase==="week_streak"?"week-streak":ch.phase==="spaced"?"spaced":"weekly";}
@@ -449,27 +458,21 @@ function renderChunkBody(ch){
 
 /* ===== HANDLERS ===== */
 function attachChunkHandlers(card, topic, ch){
-  // checkboxes (use CHANGE)
+  // checkboxes
   card.addEventListener("change",(e)=>{
     const el=e.target; if(!(el instanceof HTMLInputElement)) return;
     const act=el.dataset.act; if(!act) return;
     const [_,day,idx]=act.split(":"); const i=+idx; const arr=ch.intense[day];
-
     if(!canWorkDay(ch,day)){ el.checked = !!arr[i]; return; }
-
     const before=countTrue(arr);
     const want=!!el.checked;
     if(want && before>=3){ el.checked=false; return; }
-
     arr[i]=want;
-
     if(!ch.intenseDates) ch.intenseDates={day1:null,day2:null,day3:null};
     if(want && before===0 && !ch.intenseDates[day]) ch.intenseDates[day]=todayYMD();
     if(!arr.some(Boolean)) ch.intenseDates[day]=null;
-
     const cntEl = card.querySelector(`[data-count="${day}"]`);
     if(cntEl){ cntEl.textContent = `${countTrue(arr)}/3`; }
-
     if(intenseDone(ch)) startWeekStreak(ch);
     save();
   });
@@ -492,12 +495,9 @@ function doWeekStreakReview(ch){
   const today=todayYMD();
   const last=ch.weekStreak.lastDay;
 
-  if(!last){
-    ch.weekStreak.streak = 1;
-    ch.weekStreak.lastDay = today;
-  } else if(today===last){
-    ch.weekStreak.streak = Math.min(3, ch.weekStreak.streak + 1);
-  } else {
+  if(!last){ ch.weekStreak.streak = 1; ch.weekStreak.lastDay = today; }
+  else if(today===last){ ch.weekStreak.streak = Math.min(3, ch.weekStreak.streak + 1); }
+  else {
     const expected=addDaysYMD(last,1);
     ch.weekStreak.streak = (today===expected) ? (ch.weekStreak.streak+1) : 1;
     ch.weekStreak.lastDay = today;
@@ -531,10 +531,8 @@ function collectDue(){
     normalizeChunk(ch);
     let due=false, phase="";
     if(ch.phase==="intense"){due=true; phase="Intense";}
-    else if(ch.phase==="week_streak"){
-      due = canReviewWeekStreak(ch);
-      phase="Week-Streak";
-    } else if(ch.phase==="spaced"){due=isPastOrToday(ch.spaced.nextDue); phase="Spaced";}
+    else if(ch.phase==="week_streak"){ due = canReviewWeekStreak(ch); phase="Week-Streak"; }
+    else if(ch.phase==="spaced"){due=isPastOrToday(ch.spaced.nextDue); phase="Spaced";}
     else if(ch.phase==="weekly"){due=isPastOrToday(ch.weekly.nextDue||todayYMD()); phase="Weekly";}
     if(due) out.push({sub,topic,ch,phase});
   })));
@@ -584,8 +582,9 @@ $("#addSubject").addEventListener("click",()=>{
 });
 
 if(DB.subjects.length===0){
-  const s=createSubject("V"); const t=createTopic("d");
-  t.chunks.push(createChunk("W"),createChunk("D"),createChunk("E"));
+  const s=createSubject("History");
+  const t=createTopic("President of India Timeline");
+  t.chunks.push(createChunk("C1"));
   s.topics.push(t); DB.subjects.push(s); save();
 }else{renderAll();}
 </script>
